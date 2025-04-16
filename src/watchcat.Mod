@@ -1,0 +1,231 @@
+MODULE watchcat;
+IMPORT
+  pipes, strTypes, Texts, Oberon, Platform, Out, Strings := oocStrings, VT100, Files, SYSTEM;
+
+CONST
+  CommandMode = 0; FileMode = 1;
+  defaultInterval = 2000; (* 2 seconds in milliseconds *)
+  VERSION = "watchcat 1.0";
+  cmdArgNum=16; cmdArgLen=256;
+
+TYPE
+  pstring = strTypes.pstring;
+  StringArray = POINTER TO ARRAY OF pstring;
+
+VAR
+  mode: INTEGER; (* CommandMode or FileMode *)
+  interval: INTEGER;
+  filename: ARRAY 256 OF CHAR;
+  clearScreen, showDiff: BOOLEAN;
+  commandArgs: StringArray;
+  cmdCount: INTEGER;
+  running: BOOLEAN;
+
+PROCEDURE HandleInterrupt(signal: SYSTEM.INT32);
+BEGIN
+  running := FALSE;
+  Out.String("Exiting watchcat..."); Out.Ln;
+END HandleInterrupt;
+
+PROCEDURE ParseInterval*(in: ARRAY OF CHAR): INTEGER;
+VAR
+  i: INTEGER; num: REAL; ch: CHAR;
+BEGIN
+  i := 0; num := 0.0;
+  WHILE (in[i] >= "0") & (in[i] <= "9") OR (in[i] = ".") DO
+    IF in[i] = "." THEN num := num * 10 + (ORD(in[i]) - 30H) / 10
+    ELSE num := num * 10 + (ORD(in[i]) - 30H) END;
+    INC(i)
+  END;
+  ch := CAP(in[i]);
+  IF ch = "S" THEN num := num * 1000
+  ELSIF ch = "M" THEN num := num * 60 * 1000
+  ELSIF ch = "H" THEN num := num * 60 * 60 * 1000
+  END;
+  RETURN SHORT(ENTIER(num + 0.5))
+END ParseInterval;
+
+PROCEDURE ShowHelp;
+BEGIN
+  Out.String(VERSION); Out.Ln;
+  Out.String("Usage: watchcat [OPTIONS] -- COMMAND [ARGS...]"); Out.Ln;
+  Out.String("Options:"); Out.Ln;
+  Out.String("  -n, --interval INTERVAL  Update interval (e.g., 2s, 500ms)"); Out.Ln;
+  Out.String("  -f, --file FILENAME      Monitor file changes"); Out.Ln;
+  Out.String("  -c, --clear              Clear screen between updates"); Out.Ln;
+  Out.String("  -d, --diff               Highlight differences"); Out.Ln;
+  Out.String("  --help                   Show this help"); Out.Ln;
+END ShowHelp;
+
+PROCEDURE ParseArgs*;
+VAR
+  S: Texts.Scanner;
+  token: ARRAY 64 OF CHAR;
+  inCommand: BOOLEAN;
+  newArgs: StringArray;
+  i: INTEGER;
+BEGIN
+  Texts.OpenScanner(S, Oberon.Par.text, Oberon.Par.pos);
+  mode := CommandMode;
+  interval := defaultInterval;
+  clearScreen := FALSE;
+  showDiff := FALSE;
+  inCommand := FALSE;
+  cmdCount := 0;
+
+  NEW(commandArgs, cmdArgNum);
+  FOR i := 0 TO cmdArgNum-1 DO
+    NEW(commandArgs[i], cmdArgLen);
+  END;
+
+  WHILE ~S.eot DO
+    Texts.Scan(S);
+    IF S.class = Texts.String THEN
+      COPY(S.s, token);
+      IF token = "--" THEN
+        inCommand := TRUE;
+      ELSIF ~inCommand THEN
+        IF (token = "-n") OR (token = "--interval") THEN
+          Texts.Scan(S);
+          IF S.class = Texts.String THEN
+            interval := ParseInterval(S.s);
+          END;
+        ELSIF (token = "-f") OR (token = "--file") THEN
+          Texts.Scan(S);
+          IF S.class = Texts.String THEN
+            COPY(S.s, filename);
+            mode := FileMode;
+          END;
+        ELSIF (token = "-c") OR (token = "--clear") THEN
+          clearScreen := TRUE;
+        ELSIF (token = "-d") OR (token = "--diff") THEN
+          showDiff := TRUE;
+        ELSIF token = "--help" THEN
+          ShowHelp;
+          HALT(0);
+        ELSE
+          Out.String("Unknown option: "); Out.String(token); Out.Ln;
+          HALT(1);
+        END;
+      ELSE (* Command part *)
+        IF cmdCount >= LEN(commandArgs^) THEN
+          (* Resize the array if needed *)
+          NEW(newArgs, cmdCount + cmdArgNum);
+          FOR i := 0 TO cmdCount - 1 DO
+            newArgs[i] := commandArgs[i]
+          END;
+          FOR i := cmdCount TO (cmdCount + cmdArgNum-1) DO
+            NEW(newArgs[i], cmdArgLen)
+          END;
+          commandArgs := newArgs;
+        END;
+        COPY(token, commandArgs[cmdCount]^);
+        INC(cmdCount);
+      END;
+    END;
+  END;
+END ParseArgs;
+
+PROCEDURE GetCommandOutput(cmd: ARRAY OF CHAR): pstring;
+VAR
+  text: pipes.Text;
+  buf: pstring;
+  ch: CHAR;
+  len: INTEGER;
+  res: LONGINT;
+BEGIN
+  text := pipes.Popen(cmd, 'r');
+  NEW(buf, 4096); len := 0;
+  WHILE ~text.eof & (len < LEN(buf^) - 1) DO
+    pipes.Read(text, ch);
+    buf[len] := ch; INC(len);
+  END;
+  buf[len] := 0X;
+  res := pipes.Pclose(text);
+  RETURN buf;
+END GetCommandOutput;
+
+PROCEDURE DisplayOutput(new, old: ARRAY OF CHAR);
+BEGIN
+  IF clearScreen THEN
+    VT100.ED(2);     (* Clear entire screen *)
+    VT100.CUP(1, 1); (* Move cursor to top-left *)
+  END;
+
+  IF showDiff & (Strings.Compare(new, old) # 0) THEN
+    VT100.SetAttr(VT100.Reverse);
+    Out.String("[CHANGED]");
+    VT100.SetAttr(VT100.ResetAll);
+    Out.String(new);
+  ELSE
+    Out.String(new);
+  END;
+  Out.Ln;
+END DisplayOutput;
+
+PROCEDURE MonitorCommand;
+VAR
+  lastOutput, newOutput: pstring;
+  cmd: ARRAY 256 OF CHAR;
+  i: INTEGER;
+BEGIN
+  cmd := "";
+  FOR i := 0 TO cmdCount-1 DO
+    IF i > 0 THEN Strings.Append(" ", cmd) END;
+    Strings.Append(commandArgs[i]^, cmd);
+  END;
+
+  lastOutput := GetCommandOutput(cmd);
+  IF lastOutput # NIL THEN
+    DisplayOutput(lastOutput^, "");
+  END;
+  WHILE running DO
+    Platform.Delay(interval);
+    newOutput := GetCommandOutput(cmd);
+    DisplayOutput(newOutput^, lastOutput^);
+    lastOutput := newOutput;
+  END;
+END MonitorCommand;
+
+PROCEDURE MonitorFile;
+VAR
+  file: Files.File;
+  rider: Files.Rider;
+  pos, size: LONGINT;
+  buf: ARRAY 4096 OF CHAR;
+BEGIN
+  file := Files.Old(filename);
+  IF file = NIL THEN
+    Out.String("File not found: "); Out.String(filename); Out.Ln;
+    RETURN;
+  END;
+
+  Files.Set(rider, file, 0);
+  pos := 0;
+
+  WHILE running DO
+    Files.GetDate(file, size, size);
+    IF size > pos THEN
+      Files.Set(rider, file, pos);
+      Files.ReadBytes(rider, buf, size - pos);
+      Out.String(buf);
+      pos := size;
+    END;
+    Platform.Delay(interval);
+  END;
+END MonitorFile;
+
+BEGIN
+  running := TRUE;
+  Platform.SetInterruptHandler(HandleInterrupt);
+  ParseArgs;
+
+  IF mode = FileMode THEN
+    MonitorFile;
+  ELSIF cmdCount > 0 THEN
+    MonitorCommand;
+  ELSE
+    Out.String("Error: No command or file specified"); Out.Ln;
+    HALT(1);
+  END;
+END watchcat.
