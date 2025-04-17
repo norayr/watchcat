@@ -52,8 +52,8 @@ BEGIN
   Out.String("Options:"); Out.Ln;
   Out.String("  -n, --interval INTERVAL  Update interval (e.g., 2s, 500ms)"); Out.Ln;
   Out.String("  -f, --file FILENAME      Monitor file changes"); Out.Ln;
-  Out.String("  -c, --clear              Clear screen between updates"); Out.Ln;
-  Out.String("  -d, --diff               Highlight differences"); Out.Ln;
+  Out.String("      --no-clear           Do not clear screen between updates (default: clear)"); Out.Ln;
+  Out.String("  -d, --diff               Highlight differences (useful for small, frequently edited files)"); Out.Ln;
   Out.String("  --help                   Show this help"); Out.Ln;
 END ShowHelp;
 
@@ -66,7 +66,7 @@ BEGIN
   i := 1; (* Start at 1 to skip program name *)
   mode := CommandMode;
   interval := defaultInterval;
-  clearScreen := FALSE;
+  clearScreen := TRUE;
   showDiff := FALSE;
   cmdCount := 0;
   NEW(commandArgs, cmdArgNum);
@@ -106,8 +106,8 @@ BEGIN
       ELSE
         Out.String("Missing filename"); Out.Ln; HALT(1);
       END;
-    ELSIF (arg = "-c") OR (arg = "--clear") THEN
-      clearScreen := TRUE;
+    ELSIF (arg = "--no-clear") THEN
+      clearScreen := FALSE;
       INC(i);
     ELSIF (arg = "-d") OR (arg = "--diff") THEN
       showDiff := TRUE;
