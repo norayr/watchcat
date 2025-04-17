@@ -1,4 +1,4 @@
-DEPEND = github.com/norayr/strutils github.com/norayr/pipes
+DEPEND = github.com/norayr/time github.com/norayr/strutils github.com/norayr/pipes
 
 VOC = /opt/voc/bin/voc
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))

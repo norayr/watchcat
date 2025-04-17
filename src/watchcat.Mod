@@ -1,6 +1,6 @@
 MODULE watchcat;
 IMPORT
-  pipes, strTypes, Modules, Platform, Out, Strings := oocStrings, VT100, Files, SYSTEM;
+  pipes, strTypes, time, Modules, Platform, Out, Strings := oocStrings, VT100, Files, SYSTEM;
 
 CONST
   CommandMode = 0; FileMode = 1;
@@ -16,7 +16,7 @@ VAR
   mode: INTEGER; (* CommandMode or FileMode *)
   interval: INTEGER;
   filename: ARRAY 256 OF CHAR;
-  clearScreen, showDiff: BOOLEAN;
+  clearScreen, showDiff, showTimestamp: BOOLEAN;
   commandArgs: StringArray;
   cmdCount: INTEGER;
   running: BOOLEAN;
@@ -49,25 +49,33 @@ PROCEDURE ShowHelp;
 BEGIN
   Out.String(VERSION); Out.Ln;
   Out.String("Usage: watchcat [OPTIONS] -- COMMAND [ARGS...]"); Out.Ln;
+  Out.String("       watchcat [OPTIONS] -f FILENAME"); Out.Ln;
   Out.String("Options:"); Out.Ln;
   Out.String("  -n, --interval INTERVAL  Update interval (e.g., 2s, 500ms)"); Out.Ln;
   Out.String("  -f, --file FILENAME      Monitor file changes"); Out.Ln;
-  Out.String("      --no-clear           Do not clear screen between updates (default: clear)"); Out.Ln;
-  Out.String("  -d, --diff               Highlight differences (useful for small, frequently edited files)"); Out.Ln;
+  Out.String("      --clear              Clear screen between updates"); Out.Ln;
+  Out.String("      --no-clear           Do not clear screen between updates"); Out.Ln;
+  Out.String("                           (In command mode, clear is default)"); Out.Ln;
+  Out.String("                           (In file mode, no-clear is default)"); Out.Ln;
+  Out.String("  -d, --diff               Highlight differences (useful for commands)"); Out.Ln;
+  Out.String("  -t, --timestamp          Show timestamp when changes occur"); Out.Ln;
   Out.String("  --help                   Show this help"); Out.Ln;
 END ShowHelp;
 
 PROCEDURE ParseArgs*;
 VAR
-  i, j: INTEGER; (* Use j for the FOR loop *)
+  i, j: INTEGER;
   arg: ARRAY cmdArgLen OF CHAR;
   newArgs: StringArray;
+  clearScreenExplicit: BOOLEAN; (* if --clear/--no-clear was set *)
 BEGIN
   i := 1; (* Start at 1 to skip program name *)
   mode := CommandMode;
   interval := defaultInterval;
   clearScreen := TRUE;
+  clearScreenExplicit := FALSE;
   showDiff := FALSE;
+  showTimestamp := FALSE;
   cmdCount := 0;
   NEW(commandArgs, cmdArgNum);
   FOR j := 0 TO cmdArgNum-1 DO NEW(commandArgs[j], cmdArgLen); END; (* Use j, not i *)
@@ -109,8 +117,15 @@ BEGIN
     ELSIF (arg = "--no-clear") THEN
       clearScreen := FALSE;
       INC(i);
+    ELSIF (arg = "--clear") THEN  (* Add a new explicit clear option *)
+      clearScreen := TRUE;
+      clearScreenExplicit := TRUE;
+      INC(i);
     ELSIF (arg = "-d") OR (arg = "--diff") THEN
       showDiff := TRUE;
+      INC(i);
+    ELSIF (arg = "-t") OR (arg = "--timestamp") THEN
+      showTimestamp := TRUE;
       INC(i);
     ELSIF (arg = "--help") THEN
       ShowHelp;
@@ -119,6 +134,9 @@ BEGIN
       Out.String("Unknown option: "); Out.String(arg); Out.Ln;
       HALT(1);
     END;
+  END;
+   IF (mode = FileMode) & ~clearScreenExplicit THEN
+     clearScreen := FALSE; (* Default for file mode - no clear, like tail -f *)
   END;
 END ParseArgs;
 
@@ -142,21 +160,41 @@ BEGIN
 END GetCommandOutput;
 
 PROCEDURE DisplayOutput(new, old: ARRAY OF CHAR);
+VAR
+  year, month, day, hour, min, sec: LONGINT;
+  areEqual: BOOLEAN;
 BEGIN
+  (* First check if strings are equal *)
+  areEqual := Strings.Compare(new, old) = 0;
+  
   IF clearScreen THEN
     VT100.ED(2);     (* Clear entire screen *)
     VT100.CUP(1, 1); (* Move cursor to top-left *)
   END;
 
-  IF showDiff & (Strings.Compare(new, old) # 0) THEN
-    VT100.SetAttr(VT100.Reverse);
-    Out.String("[CHANGED]");
-    VT100.SetAttr(VT100.ResetAll);
-    Out.String(new);
-  ELSE
-    Out.String(new);
+  (* Show diff indicator if requested and content changed *)
+  IF showDiff & (~areEqual) THEN
+    (* Add timestamp if requested *)
+    IF showTimestamp THEN
+      time.Now(year, month, day, hour, min, sec);
+      VT100.SetAttr(VT100.Reverse);
+      Out.String("[Updated at ");
+      Out.Int(hour, 2); Out.String(":");
+      Out.Int(min, 2); Out.String(":");
+      Out.Int(sec, 2);
+      Out.String("]");
+      VT100.SetAttr(VT100.ResetAll);
+      Out.Ln;
+    ELSE
+      VT100.SetAttr(VT100.Reverse);
+      Out.String("[CHANGED]");
+      VT100.SetAttr(VT100.ResetAll);
+      Out.Ln;
+    END;
   END;
-  Out.Ln;
+
+  Out.String(new);
+  Out.Flush; (* Make sure output is displayed immediately *)
 END DisplayOutput;
 
 PROCEDURE MonitorCommand;
@@ -171,15 +209,20 @@ BEGIN
     Strings.Append(commandArgs[i]^, cmd);
   END;
 
+  (* Initialize with first command execution *)
   lastOutput := GetCommandOutput(cmd);
   IF lastOutput # NIL THEN
     DisplayOutput(lastOutput^, "");
   END;
+  
   WHILE running DO
     Platform.Delay(interval);
     newOutput := GetCommandOutput(cmd);
-    DisplayOutput(newOutput^, lastOutput^);
-    lastOutput := newOutput;
+    
+    IF newOutput # NIL THEN
+      DisplayOutput(newOutput^, lastOutput^);
+      lastOutput := newOutput;
+    END;
   END;
 END MonitorCommand;
 
@@ -188,30 +231,36 @@ VAR
   file: Files.File;
   rider: Files.Rider;
   pos, size, lastSize: LONGINT;
-  buf, lastBuf: ARRAY 4096 OF CHAR;  (* Add lastBuf to store previous content *)
-  i: INTEGER;
+  buf: ARRAY 4096 OF CHAR;
+  lastBuf: ARRAY 4096 OF CHAR; (* Store previous content for diff comparison *)
   checkDelay: INTEGER;
-  readLen: LONGINT;
+  readLen, safeLen: LONGINT;
+  idx: INTEGER;
 BEGIN
   pos := 0;
   lastSize := 0;
-  (* Initialize lastBuf as empty *)
-  lastBuf[0] := 0X;
+  lastBuf[0] := 0X; (* Initialize as empty *)
   
   (* Short delay between file checks to prevent excessive CPU usage *)
   checkDelay := 100; (* 100ms *)
   
+  IF clearScreen THEN
+    VT100.ED(2);     (* Clear entire screen *)
+    VT100.CUP(1, 1); (* Move cursor to top-left *)
+  END;
+  
   WHILE running DO
-    (* First check if file exists *)
     file := Files.Old(filename);
     IF file = NIL THEN
-      Out.String("File not found: "); Out.String(filename); Out.Ln;
+      IF ~clearScreen THEN (* Only show error if not clearing screen *)
+        Out.String("File not found: "); Out.String(filename); Out.Ln;
+      END;
       Platform.Delay(interval);
     ELSE
       (* Get file size *)
       size := Files.Length(file);
       
-      (* Check for changes by size *)
+      (* Check for changes *)
       IF size > pos THEN
         Files.Set(rider, file, pos);
         (* Calculate how many bytes to read safely *)
@@ -224,20 +273,62 @@ BEGIN
         Files.ReadBytes(rider, buf, readLen);
         buf[readLen] := 0X;
         
-        (* Call DisplayOutput instead of direct output *)
-        DisplayOutput(buf, lastBuf);
-        
-        (* Save current content for next comparison *)
-        COPY(buf, lastBuf);
+        (* Direct output for file mode *)
+        IF clearScreen THEN
+          VT100.ED(2);
+          VT100.CUP(1, 1);
+          (* Read from beginning *)
+          Files.Set(rider, file, 0);
+          (* Calculate safe length for full file read *)
+          IF size > LEN(buf) - 1 THEN
+            safeLen := LEN(buf) - 1;
+          ELSE
+            safeLen := size;
+          END;
+          Files.ReadBytes(rider, buf, safeLen);
+          buf[safeLen] := 0X;
+          
+          (* For clear mode, show full content with diff if requested *)
+          DisplayOutput(buf, lastBuf);
+          COPY(buf, lastBuf);
+        ELSE
+          (* Append mode - only output new content *)
+          IF showDiff THEN
+            (* In append mode with diff, show changes *)
+            DisplayOutput(buf, lastBuf);
+          ELSE
+            (* Just append the new content without formatting *)
+            idx := 0;
+            WHILE idx < readLen DO
+              Out.Char(buf[idx]);
+              INC(idx);
+            END;
+            Out.Flush;
+          END;
+          COPY(buf, lastBuf);
+        END;
         
         pos := size;
         lastSize := size;
+      ELSIF size < lastSize THEN
+        (* File was truncated, reset position *)
+        pos := 0;
+        lastSize := 0;
+        IF clearScreen THEN
+          VT100.ED(2);
+          VT100.CUP(1, 1);
+        ELSE
+          VT100.SetAttr(VT100.Reverse);
+          Out.String("[File truncated]");
+          VT100.SetAttr(VT100.ResetAll);
+          Out.Ln;
+        END;
       END;
       
       Files.Close(file);
     END;
     
-    (* Rest of the code remains the same... *)
+    Platform.Delay(checkDelay);
   END;
 END MonitorFile;
 
