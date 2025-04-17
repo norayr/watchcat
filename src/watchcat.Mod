@@ -286,40 +286,59 @@ PROCEDURE MonitorFile;
 VAR
   file: Files.File;
   rider: Files.Rider;
-  pos, size, lastSize: LONGINT;
-  buf: ARRAY 4096 OF CHAR;
-  lastBuf: ARRAY 4096 OF CHAR; (* Store previous content for diff comparison *)
+  pos, size, lastSize, lastHash: LONGINT;
+  buf, fullBuf: ARRAY 4096 OF CHAR;
+  lastBuf: ARRAY 4096 OF CHAR;
   checkDelay: INTEGER;
   readLen, safeLen: LONGINT;
   idx: INTEGER;
+  contentChanged: BOOLEAN;
+  isFirstRead: BOOLEAN;
+  year, month, day, hour, min, sec: LONGINT;
 BEGIN
   pos := 0;
   lastSize := 0;
-  lastBuf[0] := 0X; (* Initialize as empty *)
+  lastBuf[0] := 0X;
+  isFirstRead := TRUE;
 
   (* Short delay between file checks to prevent excessive CPU usage *)
-  checkDelay := 100; (* 100ms *)
+  checkDelay := 100;
 
+  (* Initial screen clear if requested *)
   IF clearScreen THEN
-    VT100.ED(2);     (* Clear entire screen *)
-    VT100.CUP(1, 1); (* Move cursor to top-left *)
+    VT100.ED(2);
+    VT100.CUP(1, 1);
   END;
 
   WHILE running DO
     file := Files.Old(filename);
     IF file = NIL THEN
-      IF ~clearScreen THEN (* Only show error if not clearing screen *)
+      IF ~clearScreen THEN
         Out.String("File not found: "); Out.String(filename); Out.Ln;
       END;
       Platform.Delay(interval);
     ELSE
-      (* Get file size *)
       size := Files.Length(file);
 
-      (* Check for changes *)
+      (* Always read the entire file for comparison when using diff mode *)
+      IF (showDiff OR clearScreen) & (size > 0) THEN
+        fullBuf[0] := 0X;
+        Files.Set(rider, file, 0);
+        IF size > LEN(fullBuf) - 1 THEN
+          safeLen := LEN(fullBuf) - 1;
+        ELSE
+          safeLen := size;
+        END;
+        Files.ReadBytes(rider, fullBuf, safeLen);
+        fullBuf[safeLen] := 0X;
+
+        (* Detect changes but skip showing [CHANGED] on first read *)
+        contentChanged := (Strings.Compare(fullBuf, lastBuf) # 0) & ~isFirstRead;
+      END;
+
       IF size > pos THEN
+        (* Always read new content from last position *)
         Files.Set(rider, file, pos);
-        (* Calculate how many bytes to read safely *)
         IF size - pos > LEN(buf) - 1 THEN
           readLen := LEN(buf) - 1;
         ELSE
@@ -329,56 +348,72 @@ BEGIN
         Files.ReadBytes(rider, buf, readLen);
         buf[readLen] := 0X;
 
-        (* Direct output for file mode *)
+        (* Clear screen if needed *)
         IF clearScreen THEN
           VT100.ED(2);
           VT100.CUP(1, 1);
-          (* Read from beginning *)
-          Files.Set(rider, file, 0);
-          (* Calculate safe length for full file read *)
-          IF size > LEN(buf) - 1 THEN
-            safeLen := LEN(buf) - 1;
-          ELSE
-            safeLen := size;
-          END;
-          Files.ReadBytes(rider, buf, safeLen);
-          buf[safeLen] := 0X;
+        END;
 
-          (* For clear mode, show full content with diff if requested *)
-          DisplayOutput(buf, lastBuf);
-          COPY(buf, lastBuf);
-        ELSE
-          (* Append mode - only output new content *)
-          IF showDiff THEN
-            (* In append mode with diff, show changes *)
-            DisplayOutput(buf, lastBuf);
+        (* Show diff indicator if needed *)
+        IF showDiff & contentChanged THEN
+          IF showTimestamp THEN
+            (* Add timestamp to the change indicator *)
+            time.Now(year, month, day, hour, min, sec);
+            VT100.SetAttr(VT100.Reverse);
+            Out.String("[Updated at ");
+            Out.Int(hour, 2); Out.String(":");
+            Out.Int(min, 2); Out.String(":");
+            Out.Int(sec, 2);
+            Out.String("]");
+            VT100.SetAttr(VT100.ResetAll);
+            Out.Ln;
           ELSE
-            (* Just append the new content without formatting *)
-            idx := 0;
-            WHILE idx < readLen DO
-              Out.Char(buf[idx]);
-              INC(idx);
-            END;
-            Out.Flush;
+            VT100.SetAttr(VT100.Reverse);
+            Out.String("[CHANGED]");
+            VT100.SetAttr(VT100.ResetAll);
+            Out.Ln;
           END;
-          COPY(buf, lastBuf);
+        END;
+
+        (* Output content *)
+        IF clearScreen THEN
+          (* In clear mode, output entire file *)
+          Out.String(fullBuf);
+        ELSE
+          (* In append mode, only output new content *)
+          idx := 0;
+          WHILE idx < readLen DO
+            Out.Char(buf[idx]);
+            INC(idx);
+          END;
+        END;
+        Out.Flush;
+
+        (* Save current content for future comparison *)
+        IF showDiff OR clearScreen THEN
+          COPY(fullBuf, lastBuf);
         END;
 
         pos := size;
         lastSize := size;
+        isFirstRead := FALSE;
       ELSIF size < lastSize THEN
-        (* File was truncated, reset position *)
+        (* File was truncated *)
         pos := 0;
         lastSize := 0;
+
         IF clearScreen THEN
           VT100.ED(2);
           VT100.CUP(1, 1);
-        ELSE
-          VT100.SetAttr(VT100.Reverse);
-          Out.String("[File truncated]");
-          VT100.SetAttr(VT100.ResetAll);
-          Out.Ln;
         END;
+
+        VT100.SetAttr(VT100.Reverse);
+        Out.String("[File truncated]");
+        VT100.SetAttr(VT100.ResetAll);
+        Out.Ln;
+
+        (* Force a re-read of the entire file *)
+        isFirstRead := TRUE;
       END;
 
       Files.Close(file);
