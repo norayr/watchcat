@@ -1,6 +1,6 @@
 MODULE watchcat;
 IMPORT
-  pipes, strTypes, Texts, Oberon, Platform, Out, Strings := oocStrings, VT100, Files, SYSTEM;
+  pipes, strTypes, Modules, Platform, Out, Strings := oocStrings, VT100, Files, SYSTEM;
 
 CONST
   CommandMode = 0; FileMode = 1;
@@ -59,69 +59,65 @@ END ShowHelp;
 
 PROCEDURE ParseArgs*;
 VAR
-  S: Texts.Scanner;
-  token: ARRAY 64 OF CHAR;
-  inCommand: BOOLEAN;
+  i, j: INTEGER; (* Use j for the FOR loop *)
+  arg: ARRAY cmdArgLen OF CHAR;
   newArgs: StringArray;
-  i: INTEGER;
 BEGIN
-  Texts.OpenScanner(S, Oberon.Par.text, Oberon.Par.pos);
+  i := 1; (* Start at 1 to skip program name *)
   mode := CommandMode;
   interval := defaultInterval;
   clearScreen := FALSE;
   showDiff := FALSE;
-  inCommand := FALSE;
   cmdCount := 0;
-
   NEW(commandArgs, cmdArgNum);
-  FOR i := 0 TO cmdArgNum-1 DO
-    NEW(commandArgs[i], cmdArgLen);
-  END;
+  FOR j := 0 TO cmdArgNum-1 DO NEW(commandArgs[j], cmdArgLen); END; (* Use j, not i *)
 
-  WHILE ~S.eot DO
-    Texts.Scan(S);
-    IF S.class = Texts.String THEN
-      COPY(S.s, token);
-      IF token = "--" THEN
-        inCommand := TRUE;
-      ELSIF ~inCommand THEN
-        IF (token = "-n") OR (token = "--interval") THEN
-          Texts.Scan(S);
-          IF S.class = Texts.String THEN
-            interval := ParseInterval(S.s);
-          END;
-        ELSIF (token = "-f") OR (token = "--file") THEN
-          Texts.Scan(S);
-          IF S.class = Texts.String THEN
-            COPY(S.s, filename);
-            mode := FileMode;
-          END;
-        ELSIF (token = "-c") OR (token = "--clear") THEN
-          clearScreen := TRUE;
-        ELSIF (token = "-d") OR (token = "--diff") THEN
-          showDiff := TRUE;
-        ELSIF token = "--help" THEN
-          ShowHelp;
-          HALT(0);
-        ELSE
-          Out.String("Unknown option: "); Out.String(token); Out.Ln;
-          HALT(1);
-        END;
-      ELSE (* Command part *)
+  WHILE i < Modules.ArgCount DO
+    Modules.GetArg(i, arg);
+    IF arg = "--" THEN
+      (* Process command after -- *)
+      i := i + 1;
+      WHILE i < Modules.ArgCount DO
+        Modules.GetArg(i, commandArgs[cmdCount]^);
+        INC(cmdCount); INC(i);
         IF cmdCount >= LEN(commandArgs^) THEN
-          (* Resize the array if needed *)
+          (* Expand array if needed *)
           NEW(newArgs, cmdCount + cmdArgNum);
-          FOR i := 0 TO cmdCount - 1 DO
-            newArgs[i] := commandArgs[i]
-          END;
-          FOR i := cmdCount TO (cmdCount + cmdArgNum-1) DO
-            NEW(newArgs[i], cmdArgLen)
-          END;
+          FOR j := 0 TO cmdCount-1 DO newArgs[j] := commandArgs[j]; END;
+          FOR j := cmdCount TO cmdCount + cmdArgNum-1 DO NEW(newArgs[j], cmdArgLen); END;
           commandArgs := newArgs;
         END;
-        COPY(token, commandArgs[cmdCount]^);
-        INC(cmdCount);
       END;
+    ELSIF (arg = "-n") OR (arg = "--interval") THEN
+      INC(i);
+      IF i < Modules.ArgCount THEN
+        Modules.GetArg(i, arg);
+        interval := ParseInterval(arg);
+        INC(i);
+      ELSE
+        Out.String("Missing value for interval"); Out.Ln; HALT(1);
+      END;
+    ELSIF (arg = "-f") OR (arg = "--file") THEN
+      INC(i);
+      IF i < Modules.ArgCount THEN
+        Modules.GetArg(i, filename);
+        mode := FileMode;
+        INC(i);
+      ELSE
+        Out.String("Missing filename"); Out.Ln; HALT(1);
+      END;
+    ELSIF (arg = "-c") OR (arg = "--clear") THEN
+      clearScreen := TRUE;
+      INC(i);
+    ELSIF (arg = "-d") OR (arg = "--diff") THEN
+      showDiff := TRUE;
+      INC(i);
+    ELSIF (arg = "--help") THEN
+      ShowHelp;
+      HALT(0); (* Exit immediately after showing help *)
+    ELSE
+      Out.String("Unknown option: "); Out.String(arg); Out.Ln;
+      HALT(1);
     END;
   END;
 END ParseArgs;
