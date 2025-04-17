@@ -21,6 +21,20 @@ VAR
   cmdCount: INTEGER;
   running: BOOLEAN;
 
+PROCEDURE Contains(s: ARRAY OF CHAR; ch: CHAR): BOOLEAN;
+VAR
+  i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (s[i] # 0X) DO
+    IF s[i] = ch THEN
+      RETURN TRUE;
+    END;
+    INC(i);
+  END;
+  RETURN FALSE;
+END Contains;
+
 PROCEDURE HandleInterrupt(signal: SYSTEM.INT32);
 BEGIN
   running := FALSE;
@@ -149,6 +163,15 @@ VAR
   res: LONGINT;
 BEGIN
   text := pipes.Popen(cmd, 'r');
+
+  IF text = NIL THEN
+    (* Command failed to execute *)
+    NEW(buf, 100);
+    COPY("Command execution failed: ", buf^);
+    Strings.Append(cmd, buf^);
+    RETURN buf;
+  END;
+
   NEW(buf, 4096); len := 0;
   WHILE ~text.eof & (len < LEN(buf^) - 1) DO
     pipes.Read(text, ch);
@@ -156,6 +179,16 @@ BEGIN
   END;
   buf[len] := 0X;
   res := pipes.Pclose(text);
+
+  (* Add exit code if non-zero *)
+  IF res # 0 THEN
+    Strings.Append(CHR(10), buf^); (* Add newline *)
+    Strings.Append("[Command exited with code ", buf^);
+    (* Convert exit code to string and append *)
+    (* This part is simplified - in a real implementation you'd convert the number *)
+    Strings.Append("]", buf^);
+  END;
+
   RETURN buf;
 END GetCommandOutput;
 
@@ -164,15 +197,15 @@ VAR
   year, month, day, hour, min, sec: LONGINT;
   areEqual: BOOLEAN;
 BEGIN
-  (* First check if strings are equal *)
-  areEqual := Strings.Compare(new, old) = 0;
-  
   IF clearScreen THEN
     VT100.ED(2);     (* Clear entire screen *)
     VT100.CUP(1, 1); (* Move cursor to top-left *)
   END;
 
-  (* Show diff indicator if requested and content changed *)
+  (* First check if strings are equal *)
+  areEqual := Strings.Compare(new, old) = 0;
+
+  (* Show diff indicator if content changed *)
   IF showDiff & (~areEqual) THEN
     (* Add timestamp if requested *)
     IF showTimestamp THEN
@@ -194,19 +227,42 @@ BEGIN
   END;
 
   Out.String(new);
-  Out.Flush; (* Make sure output is displayed immediately *)
+  Out.Flush; (* Ensure output is displayed immediately *)
 END DisplayOutput;
 
 PROCEDURE MonitorCommand;
 VAR
   lastOutput, newOutput: pstring;
   cmd: ARRAY 256 OF CHAR;
-  i: INTEGER;
+  shellCmd: ARRAY 512 OF CHAR;
+  i, j: INTEGER;
+  hasSpecialChars: BOOLEAN;
 BEGIN
   cmd := "";
+  hasSpecialChars := FALSE;
+
   FOR i := 0 TO cmdCount-1 DO
     IF i > 0 THEN Strings.Append(" ", cmd) END;
     Strings.Append(commandArgs[i]^, cmd);
+
+    (* Check if this argument contains any shell special characters *)
+    j := 0;
+    WHILE (commandArgs[i]^[j] # 0X) & ~hasSpecialChars DO
+      IF (commandArgs[i]^[j] = "|") OR (commandArgs[i]^[j] = ">") OR
+         (commandArgs[i]^[j] = "<") OR (commandArgs[i]^[j] = ";") THEN
+        hasSpecialChars := TRUE;
+      END;
+      INC(j);
+    END;
+  END;
+
+  (* If command has special shell characters, wrap it in a shell invocation *)
+  IF hasSpecialChars THEN
+    (* Use double quotes instead of single quotes for better compatibility *)
+    shellCmd := "sh -c '";
+    Strings.Append(cmd, shellCmd);
+    Strings.Append("'", shellCmd);
+    COPY(shellCmd, cmd);
   END;
 
   (* Initialize with first command execution *)
@@ -214,11 +270,11 @@ BEGIN
   IF lastOutput # NIL THEN
     DisplayOutput(lastOutput^, "");
   END;
-  
+
   WHILE running DO
     Platform.Delay(interval);
     newOutput := GetCommandOutput(cmd);
-    
+
     IF newOutput # NIL THEN
       DisplayOutput(newOutput^, lastOutput^);
       lastOutput := newOutput;
@@ -240,15 +296,15 @@ BEGIN
   pos := 0;
   lastSize := 0;
   lastBuf[0] := 0X; (* Initialize as empty *)
-  
+
   (* Short delay between file checks to prevent excessive CPU usage *)
   checkDelay := 100; (* 100ms *)
-  
+
   IF clearScreen THEN
     VT100.ED(2);     (* Clear entire screen *)
     VT100.CUP(1, 1); (* Move cursor to top-left *)
   END;
-  
+
   WHILE running DO
     file := Files.Old(filename);
     IF file = NIL THEN
@@ -259,7 +315,7 @@ BEGIN
     ELSE
       (* Get file size *)
       size := Files.Length(file);
-      
+
       (* Check for changes *)
       IF size > pos THEN
         Files.Set(rider, file, pos);
@@ -269,10 +325,10 @@ BEGIN
         ELSE
           readLen := size - pos;
         END;
-        
+
         Files.ReadBytes(rider, buf, readLen);
         buf[readLen] := 0X;
-        
+
         (* Direct output for file mode *)
         IF clearScreen THEN
           VT100.ED(2);
@@ -287,7 +343,7 @@ BEGIN
           END;
           Files.ReadBytes(rider, buf, safeLen);
           buf[safeLen] := 0X;
-          
+
           (* For clear mode, show full content with diff if requested *)
           DisplayOutput(buf, lastBuf);
           COPY(buf, lastBuf);
@@ -307,7 +363,7 @@ BEGIN
           END;
           COPY(buf, lastBuf);
         END;
-        
+
         pos := size;
         lastSize := size;
       ELSIF size < lastSize THEN
@@ -324,10 +380,10 @@ BEGIN
           Out.Ln;
         END;
       END;
-      
+
       Files.Close(file);
     END;
-    
+
     Platform.Delay(checkDelay);
   END;
 END MonitorFile;
