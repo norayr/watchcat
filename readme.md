@@ -22,5 +22,5 @@ Options:
   --help                   Show this help
 ```
 
-also you can watch [this video](https://toobnix.org/w/rUCuvw4UHvtkorPnawtHKJ).
+also you can watch [this video](https://toobnix.org/w/taHbL5P534jHNFyZJBPrv].
 
