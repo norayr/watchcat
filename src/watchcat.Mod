@@ -117,7 +117,7 @@ BEGIN
         interval := ParseInterval(arg);
         INC(i);
       ELSE
-        Out.String("Missing value for interval"); Out.Ln; HALT(1);
+        Out.String("Missing value for interval"); Out.Ln; Platform.Exit(1);
       END;
     ELSIF (arg = "-f") OR (arg = "--file") THEN
       INC(i);
@@ -126,7 +126,7 @@ BEGIN
         mode := FileMode;
         INC(i);
       ELSE
-        Out.String("Missing filename"); Out.Ln; HALT(1);
+        Out.String("Missing filename"); Out.Ln; Platform.Exit(1);
       END;
     ELSIF (arg = "--no-clear") THEN
       clearScreen := FALSE;
@@ -143,10 +143,10 @@ BEGIN
       INC(i);
     ELSIF (arg = "--help") THEN
       ShowHelp;
-      HALT(0); (* Exit immediately after showing help *)
+        Platform.Exit(0); (* Exit immediately after showing help *)
     ELSE
       Out.String("Unknown option: "); Out.String(arg); Out.Ln;
-      HALT(1);
+      Platform.Exit(1);
     END;
   END;
    IF (mode = FileMode) & ~clearScreenExplicit THEN
@@ -434,6 +434,6 @@ BEGIN
     MonitorCommand;
   ELSE
     Out.String("Error: No command or file specified"); Out.Ln;
-    HALT(1);
+    Platform.Exit(1);
   END;
 END watchcat.
