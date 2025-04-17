@@ -187,27 +187,64 @@ PROCEDURE MonitorFile;
 VAR
   file: Files.File;
   rider: Files.Rider;
-  pos, size: LONGINT;
+  pos, size, lastSize: LONGINT;
   buf: ARRAY 4096 OF CHAR;
+  i: INTEGER;
+  checkDelay: INTEGER;
+  readLen: LONGINT;
 BEGIN
-  file := Files.Old(filename);
-  IF file = NIL THEN
-    Out.String("File not found: "); Out.String(filename); Out.Ln;
-    RETURN;
-  END;
-
-  Files.Set(rider, file, 0);
   pos := 0;
-
+  lastSize := 0;
+  (* Short delay between file checks to prevent excessive CPU usage *)
+  checkDelay := 100; (* 100ms *)
+  
   WHILE running DO
-    Files.GetDate(file, size, size);
-    IF size > pos THEN
-      Files.Set(rider, file, pos);
-      Files.ReadBytes(rider, buf, size - pos);
-      Out.String(buf);
-      pos := size;
+    (* First check if file exists *)
+    file := Files.Old(filename);
+    IF file = NIL THEN
+      Out.String("File not found: "); Out.String(filename); Out.Ln;
+      Platform.Delay(interval);
+    ELSE
+      (* Get file size *)
+      size := Files.Length(file);
+      
+      (* Check for changes by size *)
+      IF size > pos THEN
+        Files.Set(rider, file, pos);
+        (* Calculate how many bytes to read safely *)
+        IF size - pos > LEN(buf) - 1 THEN
+          readLen := LEN(buf) - 1;
+        ELSE
+          readLen := size - pos;
+        END;
+        
+        Files.ReadBytes(rider, buf, readLen);
+        buf[readLen] := 0X;
+        Out.String(buf);
+        Out.Flush;
+        pos := size;
+        lastSize := size;
+      END;
+      
+      Files.Close(file);
     END;
-    Platform.Delay(interval);
+    
+    (* Use a two-phase delay strategy for better responsiveness *)
+    i := 0;
+    WHILE (i < interval DIV checkDelay) & running DO
+      Platform.Delay(checkDelay);
+      (* Quick check for file changes during the delay period *)
+      file := Files.Old(filename);
+      IF file # NIL THEN
+        IF Files.Length(file) > pos THEN
+          Files.Close(file);
+          i := interval; (* Force exit from delay loop *)
+        ELSE
+          Files.Close(file);
+        END;
+      END;
+      INC(i);
+    END;
   END;
 END MonitorFile;
 
