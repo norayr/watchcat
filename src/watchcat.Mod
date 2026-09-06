@@ -76,6 +76,47 @@ BEGIN
   Out.String("  --help                   Show this help"); Out.Ln;
 END ShowHelp;
 
+PROCEDURE ExtractLine(s: ARRAY OF CHAR; VAR pos: INTEGER; VAR line: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  IF s[pos] = 0X THEN RETURN FALSE END;
+  i := 0;
+  WHILE (s[pos] # 0X) & (s[pos] # 0AX) & (i < LEN(line) - 1) DO
+    line[i] := s[pos]; INC(i); INC(pos)
+  END;
+  line[i] := 0X;
+  IF s[pos] = 0AX THEN INC(pos) END;
+  RETURN TRUE
+END ExtractLine;
+
+PROCEDURE DisplayDiff(new, old: ARRAY OF CHAR);
+VAR
+  newLine, oldLine: ARRAY 1024 OF CHAR;
+  newPos, oldPos: INTEGER;
+  hasNew, hasOld, oldDone: BOOLEAN;
+BEGIN
+  newPos := 0; oldPos := 0;
+  oldDone := old[0] = 0X;
+  oldLine[0] := 0X;
+  hasNew := ExtractLine(new, newPos, newLine);
+  WHILE hasNew DO
+    IF ~oldDone THEN
+      hasOld := ExtractLine(old, oldPos, oldLine);
+      IF ~hasOld THEN oldDone := TRUE; oldLine[0] := 0X END
+    END;
+    IF Strings.Compare(newLine, oldLine) = 0 THEN
+      Out.String(newLine)
+    ELSE
+      VT100.SetAttr(VT100.BYellow);
+      VT100.SetAttr(VT100.Black);
+      Out.String(newLine);
+      VT100.SetAttr(VT100.ResetAll)
+    END;
+    Out.Ln;
+    hasNew := ExtractLine(new, newPos, newLine)
+  END
+END DisplayDiff;
+
 PROCEDURE ParseArgs*;
 VAR
   i, j: INTEGER;
@@ -202,32 +243,26 @@ BEGIN
     VT100.CUP(1, 1); (* Move cursor to top-left *)
   END;
 
-  (* First check if strings are equal *)
-  areEqual := Strings.Compare(new, old) = 0;
+  areEqual := (old[0] = 0X) OR (Strings.Compare(new, old) = 0);
 
-  (* Show diff indicator if content changed *)
-  IF showDiff & (~areEqual) THEN
-    (* Add timestamp if requested *)
-    IF showTimestamp THEN
-      time.Now(year, month, day, hour, min, sec);
-      VT100.SetAttr(VT100.Reverse);
-      Out.String("[Updated at ");
-      Out.Int(hour, 2); Out.String(":");
-      Out.Int(min, 2); Out.String(":");
-      Out.Int(sec, 2);
-      Out.String("]");
-      VT100.SetAttr(VT100.ResetAll);
-      Out.Ln;
-    ELSE
-      VT100.SetAttr(VT100.Reverse);
-      Out.String("[CHANGED]");
-      VT100.SetAttr(VT100.ResetAll);
-      Out.Ln;
-    END;
+  IF showDiff & showTimestamp & ~areEqual THEN
+    time.Now(year, month, day, hour, min, sec);
+    VT100.SetAttr(VT100.Reverse);
+    Out.String("[Updated at ");
+    Out.Int(hour, 2); Out.String(":");
+    Out.Int(min, 2); Out.String(":");
+    Out.Int(sec, 2);
+    Out.String("]");
+    VT100.SetAttr(VT100.ResetAll);
+    Out.Ln;
   END;
 
-  Out.String(new);
-  Out.Flush; (* Ensure output is displayed immediately *)
+  IF showDiff & (old[0] # 0X) THEN
+    DisplayDiff(new, old)
+  ELSE
+    Out.String(new)
+  END;
+  Out.Flush;
 END DisplayOutput;
 
 PROCEDURE MonitorCommand;
@@ -354,31 +389,25 @@ BEGIN
           VT100.CUP(1, 1);
         END;
 
-        (* Show diff indicator if needed *)
-        IF showDiff & contentChanged THEN
-          IF showTimestamp THEN
-            (* Add timestamp to the change indicator *)
-            time.Now(year, month, day, hour, min, sec);
-            VT100.SetAttr(VT100.Reverse);
-            Out.String("[Updated at ");
-            Out.Int(hour, 2); Out.String(":");
-            Out.Int(min, 2); Out.String(":");
-            Out.Int(sec, 2);
-            Out.String("]");
-            VT100.SetAttr(VT100.ResetAll);
-            Out.Ln;
-          ELSE
-            VT100.SetAttr(VT100.Reverse);
-            Out.String("[CHANGED]");
-            VT100.SetAttr(VT100.ResetAll);
-            Out.Ln;
-          END;
+        IF showDiff & contentChanged & showTimestamp THEN
+          time.Now(year, month, day, hour, min, sec);
+          VT100.SetAttr(VT100.Reverse);
+          Out.String("[Updated at ");
+          Out.Int(hour, 2); Out.String(":");
+          Out.Int(min, 2); Out.String(":");
+          Out.Int(sec, 2);
+          Out.String("]");
+          VT100.SetAttr(VT100.ResetAll);
+          Out.Ln;
         END;
 
         (* Output content *)
         IF clearScreen THEN
-          (* In clear mode, output entire file *)
-          Out.String(fullBuf);
+          IF showDiff THEN
+            DisplayDiff(fullBuf, lastBuf)
+          ELSE
+            Out.String(fullBuf)
+          END;
         ELSE
           (* In append mode, only output new content *)
           idx := 0;
